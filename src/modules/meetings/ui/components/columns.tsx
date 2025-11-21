@@ -18,7 +18,7 @@ import { GeneratedAvatar } from "@/components/generated-avatar";
 
 import { MeetingGetMany } from "../../types";
 
-type Meeting = MeetingGetMany[number];
+// type Meeting = MeetingGetMany[number];
 
 function formatDuration(seconds: number) {
   return humanizeDuration(seconds * 1000, {

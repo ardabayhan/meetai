@@ -135,6 +135,6 @@ export const DashboardUserButton = () => {
     </DropdownMenu>
   );
 };
-function async() {
-  throw new Error("Function not implemented.");
-}
+// function async () {
+//   throw new Error("Function not implemented.");
+// }
