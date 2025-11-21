@@ -143,7 +143,7 @@ export async function POST(req: NextRequest) {
                 transcriptUrl: updatedMeeting.transcriptUrl,
             }
         })
-    } else if (eventType === "call.recording_ready") {
+    }  else if (eventType === "call.recording_ready") {
         const event = payload as CallRecordingReadyEvent
         const meetingId = event.call_cid.split(":")[1]; // call_cid is formatted as "type:id"
 

@@ -11,7 +11,7 @@ import { StreamTranscriptItem } from "@/modules/meetings/types";
 const summarizer = createAgent({
   name: "summarizer",
   system: `
-  You are an expert summarizer. You write readable, concise, simple content. You are given a transcript of a meeting and you need to summarize it.
+    You are an expert summarizer. You write readable, concise, simple content. You are given a transcript of a meeting and you need to summarize it.
 
 Use the following markdown structure for every output:
 
@@ -38,17 +38,16 @@ export const meetingsProcessing = inngest.createFunction(
   { id: "meetings/processing" },
   { event: "meetings/processing" },
   async ({ event, step }) => {
-    const response = await step.run("fetch-transcript", async () => {
-      return fetch(event.data.transcriptUrl).then((res) => res.text());
-    });
+    const response = await step.fetch(event.data.transcriptUrl);
 
     const transcript = await step.run("parse-transcript", async () => {
-      return JSONL.parse<StreamTranscriptItem>(response);
+      const text = await response.text();
+      return JSONL.parse<StreamTranscriptItem>(text);
     });
 
     const transcriptWithSpeakers = await step.run("add-speakers", async () => {
       const speakerIds = [
-        ...new Set(transcript.map((item) => item.speaker_id)),
+        ...new Set(transcript.map((item) => item.speaker_id))
       ];
 
       const userSpeakers = await db
@@ -61,39 +60,39 @@ export const meetingsProcessing = inngest.createFunction(
           }))
         );
 
-        const agentSpeakers = await db
-          .select()
-          .from(agents)
-          .where(inArray(agents.id, speakerIds))
-          .then((agents) => 
-            agents.map((agent) => ({
-              ...agent,
-            }))
-          );
-    
-        const speakers = [...userSpeakers, ...agentSpeakers];
+      const agentSpeakers = await db
+        .select()
+        .from(agents)
+        .where(inArray(user.id, speakerIds))
+        .then((agents) =>
+          agents.map((agent) => ({
+            ...agent,
+          }))
+        );
 
-        return transcript.map((item) => {
-          const speaker = speakers.find(
-            (speaker) => speaker.id === item.speaker_id
-          );
+      const speakers = [...userSpeakers, ...agentSpeakers];
 
-          if (!speaker) {
-            return {
-              ...item,
-              user: {
-                name: "Unknown",
-              },
-            };
-          }
+      return transcript.map((item) => {
+        const speaker = speakers.find(
+          (speaker) => speaker.id === item.speaker_id
+        );
 
+        if (!speaker) {
           return {
             ...item,
             user: {
-              name: speaker.name,
+              name: "Unknown",
             },
           };
-        });
+        }
+
+        return {
+          ...item,
+          user: {
+            name: speaker.name,
+          },
+        };
+      });
     });
 
     const { output } = await summarizer.run(
@@ -112,3 +111,4 @@ export const meetingsProcessing = inngest.createFunction(
     })
   },
 );
+
