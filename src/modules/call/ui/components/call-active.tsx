@@ -4,7 +4,6 @@ import {
     CallControls,
     SpeakerLayout,
 } from "@stream-io/video-react-sdk";
-
 interface Props {
     onLeave: () => void;
     meetingName: string;
