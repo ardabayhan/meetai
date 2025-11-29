@@ -23,7 +23,6 @@ import {
   DrawerTrigger,
 } from "@/components/ui/drawer";
 import { Button } from "@/components/ui/button";
-import { auth } from "@/lib/auth";
 
 export const DashboardUserButton = () => {
   const router = useRouter();

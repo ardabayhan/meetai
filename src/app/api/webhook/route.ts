@@ -16,7 +16,6 @@ import { agents, meetings } from "@/db/schema";
 import { streamVideo } from "@/lib/stream-video";
 import { inngest } from "@/inngest/client";
 import { generateAvatarUri } from "@/lib/avatar";
-import { id } from "date-fns/locale";
 import { streamChat } from "@/lib/stream-chat";
 
 const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
