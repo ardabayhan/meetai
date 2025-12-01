@@ -5,7 +5,6 @@ import { CallActive } from "./call-active";
 import { CallEnded } from "./call-ended";
 import { useTRPC } from "@/trpc/client";
 import { useMutation } from "@tanstack/react-query";
-import { MeetingStatus } from "@/modules/meetings/types";
 
 interface Props {
     meetingName: string;
