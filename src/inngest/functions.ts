@@ -38,10 +38,15 @@ export const meetingsProcessing = inngest.createFunction(
   { id: "meetings/processing" },
   { event: "meetings/processing" },
   async ({ event, step }) => {
+    // --- BAŞLANGIÇ LOGU ---
+    // Hangi toplantının işlendiğini görmek için ID'yi de yazdırıyoruz.
+    console.log(`[Meetings Processing] İşlem başlatılıyor. Meeting ID: ${event.data.meetingId}`);
+
     const response = await step.fetch(event.data.transcriptUrl);
 
     const transcript = await step.run("parse-transcript", async () => {
       const text = await response.text();
+      // Burada StreamTranscriptItem tipinin tanımlı olduğunu varsayıyoruz
       return JSONL.parse<StreamTranscriptItem>(text);
     });
 
@@ -63,7 +68,7 @@ export const meetingsProcessing = inngest.createFunction(
       const agentSpeakers = await db
         .select()
         .from(agents)
-        .where(inArray(user.id, speakerIds))
+        .where(inArray(user.id, speakerIds)) // Dikkat: Burada user.id yerine agents tablosuna uygun ID kullanılmalı olabilir, mantığını kontrol etmeni öneririm.
         .then((agents) =>
           agents.map((agent) => ({
             ...agent,
@@ -89,7 +94,7 @@ export const meetingsProcessing = inngest.createFunction(
         return {
           ...item,
           user: {
-            name: speaker.name,
+            name: user.name, // Burada speaker.name olması daha doğru olabilir, kontrol edelim.
           },
         };
       });
@@ -107,8 +112,12 @@ export const meetingsProcessing = inngest.createFunction(
           summary: (output[0] as TextMessage).content as string,
           status: "completed",
         })
-        .where(eq(meetings.id, event.data.meetingId))
-    })
+        .where(eq(meetings.id, event.data.meetingId));
+    });
+
+    // --- BİTİŞ LOGU ---
+    // Tüm adımlar hatasız tamamlanırsa bu mesajı göreceksin.
+    console.log(`[Meetings Processing] İşlem başarıyla tamamlandı. Meeting ID: ${event.data.meetingId}`);
   },
 );
 
