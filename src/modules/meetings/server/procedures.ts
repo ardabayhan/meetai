@@ -57,9 +57,34 @@ export const meetingsRouter = createTRPCRouter({
             return [];
           });
 
+        console.log(`[getTranscript] Total transcript items: ${transcript.length}`);
+        console.log(`[getTranscript] Meeting agent ID: ${existingMeeting.agentId}`);
+
+        // Log all speaker_ids and their texts for debugging
+        const speakerIdMap = new Map<string, string[]>();
+        transcript.forEach((item) => {
+          if (!speakerIdMap.has(item.speaker_id)) {
+            speakerIdMap.set(item.speaker_id, []);
+          }
+          speakerIdMap.get(item.speaker_id)?.push(item.text?.substring(0, 30) || "");
+        });
+        
+        console.log(`[getTranscript] Speaker ID map:`, Array.from(speakerIdMap.entries()).map(([id, texts]) => 
+          `${id}: [${texts.length} messages, sample: "${texts[0]}"]`
+        ));
+
         const speakerIds = [
           ...new Set(transcript.map((item) => item.speaker_id)),
         ];
+
+        console.log(`[getTranscript] Found speaker IDs: ${speakerIds.join(", ")}`);
+        
+        // Check if agent ID appears in any speaker_id (partial match)
+        const agentIdMatches = speakerIds.filter(id => 
+          id.includes(existingMeeting.agentId) || 
+          existingMeeting.agentId.includes(id)
+        );
+        console.log(`[getTranscript] Agent ID partial matches: ${agentIdMatches.join(", ")}`);
 
         const userSpeakers = await db
           .select()
@@ -88,7 +113,16 @@ export const meetingsRouter = createTRPCRouter({
             }))
           );
 
+        console.log(`[getTranscript] Found ${userSpeakers.length} user speakers and ${agentSpeakers.length} agent speakers`);
+
         const speakers = [...userSpeakers, ...agentSpeakers];
+
+        // Get agent info for fallback matching
+        const [meetingAgent] = await db
+          .select()
+          .from(agents)
+          .where(eq(agents.id, existingMeeting.agentId))
+          .limit(1);
 
         const transcriptWithSpeakers = transcript.map((item) => {
           const speaker = speakers.find(
@@ -96,6 +130,29 @@ export const meetingsRouter = createTRPCRouter({
           );
 
           if (!speaker) {
+            // Log unmatched speaker_id for debugging
+            console.log(`[getTranscript] Unmatched speaker_id: ${item.speaker_id}, text: ${item.text?.substring(0, 50)}`);
+            
+            // Check if this might be the agent with a different ID format
+            // Sometimes Stream Video uses different ID formats for OpenAI realtime agents
+            // Try partial matching or check if speaker_id contains agent ID
+            if (meetingAgent && (
+              item.speaker_id.includes(meetingAgent.id) || 
+              meetingAgent.id.includes(item.speaker_id) ||
+              item.speaker_id === meetingAgent.id
+            )) {
+              return {
+                ...item,
+                user: {
+                  name: meetingAgent.name,
+                  image: generateAvatarUri({
+                    seed: meetingAgent.name,
+                    variant: "botttsNeutral",
+                  }),
+                },
+              };
+            }
+            
             return {
               ...item,
               user: {
@@ -205,7 +262,7 @@ export const meetingsRouter = createTRPCRouter({
           },
           settings_override: {
             transcription: {
-              language: "en",
+              language: "tr", // Turkish language for transcription
               mode: "auto-on",
               closed_caption_mode: "auto-on"
             },

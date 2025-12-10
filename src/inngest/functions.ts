@@ -11,25 +11,27 @@ import { StreamTranscriptItem } from "@/modules/meetings/types";
 const summarizer = createAgent({
   name: "summarizer",
   system: `
-    You are an expert summarizer. You write readable, concise, simple content. You are given a transcript of a meeting and you need to summarize it.
+    Sen uzman bir özetleme asistanısın. Okunabilir, özlü ve basit içerikler yazarsın. Sana bir toplantı transkripti verilir ve bunu özetlemen gerekir.
 
-Use the following markdown structure for every output:
+Her çıktı için aşağıdaki markdown yapısını kullan:
 
-### Overview
-Provide a detailed, engaging summary of the session's content. Focus on major features, user workflows, and any key takeaways. Write in a narrative style, using full sentences. Highlight unique or powerful aspects of the product, platform, or discussion.
+### Genel Bakış
+Oturum içeriğinin detaylı ve ilgi çekici bir özetini sun. Ana özellikler, kullanıcı iş akışları ve önemli çıkarımlara odaklan. Hikaye anlatımı tarzında, tam cümlelerle yaz. Ürün, platform veya tartışmanın benzersiz veya güçlü yönlerini vurgula.
 
-### Notes
-Break down key content into thematic sections with timestamp ranges. Each section should summarize key points, actions, or demos in bullet format.
+### Notlar
+Ana içeriği zaman damgalı tematik bölümlere ayır. Her bölüm, ana noktaları, eylemleri veya demoları madde işareti formatında özetlemelidir.
 
-Example:
-#### Section Name
-- Main point or demo shown here
-- Another key insight or interaction
-- Follow-up tool or explanation provided
+Örnek:
+#### Bölüm Adı
+- Burada gösterilen ana nokta veya demo
+- Başka bir önemli içgörü veya etkileşim
+- Sağlanan takip aracı veya açıklama
 
-#### Next Section
-- Feature X automatically does Y
-- Mention of integration with Z
+#### Sonraki Bölüm
+- X özelliği otomatik olarak Y yapar
+- Z ile entegrasyondan bahsedilir
+
+ÖNEMLİ: Tüm özeti Türkçe yaz. Hiçbir zaman İngilizce veya başka bir dilde yazma.
   `.trim(),
   model: openai({ model: "gpt-4o", apiKey: process.env.OPENAI_API_KEY }),
 });
@@ -38,14 +40,19 @@ export const meetingsProcessing = inngest.createFunction(
   { id: "meetings/processing" },
   { event: "meetings/processing" },
   async ({ event, step }) => {
-    // --- BAŞLANGIÇ LOGU ---
-    // Hangi toplantının işlendiğini görmek için ID'yi de yazdırıyoruz.
-    console.log(`[Meetings Processing] İşlem başlatılıyor. Meeting ID: ${event.data.meetingId}`);
+    console.log(`[Inngest] Processing meeting ${event.data.meetingId}, transcript URL: ${event.data.transcriptUrl}`);
 
     const response = await step.fetch(event.data.transcriptUrl);
 
+    if (!response.ok) {
+      throw new Error(`Failed to fetch transcript: ${response.status} ${response.statusText}`);
+    }
+
     const transcript = await step.run("parse-transcript", async () => {
       const text = await response.text();
+      if (!text || text.trim() === "") {
+        throw new Error("Transcript is empty");
+      }
       // Burada StreamTranscriptItem tipinin tanımlı olduğunu varsayıyoruz
       return JSONL.parse<StreamTranscriptItem>(text);
     });
@@ -68,7 +75,7 @@ export const meetingsProcessing = inngest.createFunction(
       const agentSpeakers = await db
         .select()
         .from(agents)
-        .where(inArray(user.id, speakerIds)) // Dikkat: Burada user.id yerine agents tablosuna uygun ID kullanılmalı olabilir, mantığını kontrol etmeni öneririm.
+        .where(inArray(agents.id, speakerIds))
         .then((agents) =>
           agents.map((agent) => ({
             ...agent,
@@ -94,30 +101,34 @@ export const meetingsProcessing = inngest.createFunction(
         return {
           ...item,
           user: {
-            name: user.name, // Burada speaker.name olması daha doğru olabilir, kontrol edelim.
+            name: speaker.name,
           },
         };
       });
     });
 
+    // Generate summary - summarizer.run() uses step.* internally, so we can't nest it in step.run()
+    console.log(`[Inngest] Generating summary for meeting ${event.data.meetingId}`);
     const { output } = await summarizer.run(
-      "Summarize the following transcript: " +
+      "Aşağıdaki transkripti Türkçe olarak özetle. Tüm özet Türkçe olmalı: " +
         JSON.stringify(transcriptWithSpeakers)
     );
 
     await step.run("save-summary", async () => {
+      const summaryContent = (output[0] as TextMessage).content as string;
+      console.log(`[Inngest] Saving summary for meeting ${event.data.meetingId}, length: ${summaryContent.length}`);
+      
       await db
         .update(meetings)
         .set({
-          summary: (output[0] as TextMessage).content as string,
+          summary: summaryContent,
           status: "completed",
         })
         .where(eq(meetings.id, event.data.meetingId));
+      
+      console.log(`[Inngest] Summary saved successfully for meeting ${event.data.meetingId}`);
     });
 
-    // --- BİTİŞ LOGU ---
-    // Tüm adımlar hatasız tamamlanırsa bu mesajı göreceksin.
-    console.log(`[Meetings Processing] İşlem başarıyla tamamlandı. Meeting ID: ${event.data.meetingId}`);
   },
 );
 

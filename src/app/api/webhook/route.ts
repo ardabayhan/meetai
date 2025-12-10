@@ -93,15 +93,50 @@ export async function POST(req: NextRequest) {
     }
 
     const call = streamVideo.video.call("default", meetingId);
-    const realtimeClient = await streamVideo.video.connectOpenAi({
-      call,
-      openAiApiKey: process.env.OPENAI_API_KEY!,
-      agentUserId: existingAgent.id,
-    });
+    
+    try {
+      // connectOpenAi creates the client and calls connect() internally
+      // We'll update session after connection but we need to ensure it's done properly
+      const realtimeClient = await streamVideo.video.connectOpenAi({
+        call,
+        openAiApiKey: process.env.OPENAI_API_KEY!,
+        agentUserId: existingAgent.id,
+      });
 
-    realtimeClient.updateSession({
-      instructions: existingAgent.instructions,
-    });
+      // Wait for session to be created first
+      await realtimeClient.waitForSessionCreated();
+
+      // Update session with agent instructions and enable turn detection
+      // turn_detection enables the agent to detect when to speak
+      // input_audio_transcription enables the agent to understand speech
+      // Add language instruction to ensure agent speaks Turkish from the start
+      const instructionsWithLanguage = `You are a Turkish-speaking AI assistant. You MUST always speak in Turkish (Türkçe) from the very beginning. Never speak in Spanish, English, or any other language. All your responses must be in Turkish.
+
+${existingAgent.instructions}`;
+
+      realtimeClient.updateSession({
+        instructions: instructionsWithLanguage,
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 500,
+        },
+        input_audio_transcription: {
+          model: "gpt-4o-transcribe" as any, // Stream Video wrapper supports this, but OpenAI types only allow "whisper-1"
+          language: "tr", // Turkish language for agent transcription
+        } as any, // Stream Video wrapper supports language property
+      });
+
+      // Wait a bit to ensure the update is processed
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      console.log(`[Webhook] Agent ${existingAgent.id} connected to meeting ${meetingId}, session created, instructions: "${existingAgent.instructions.substring(0, 50)}..."`);
+    } catch (error) {
+      console.error(`[Webhook] Error connecting agent to meeting ${meetingId}:`, error);
+      // Don't throw - we still want to return success to Stream
+      // The meeting can continue without the agent
+    }
   } else if (eventType === "call.session_participant_left") {
     const event = payload as CallSessionParticipantLeftEvent;
     const meetingId = event.call_cid.split(":")[1]; // call_cid is formatted as "type:id"
@@ -166,14 +201,16 @@ export async function POST(req: NextRequest) {
     const userId = event.user?.id;
     const channelId = event.channel_id;
     const text = event.message?.text;
+    const messageId = event.message?.id;
 
-    if (!userId || !channelId || !text) {
+    if (!userId || !channelId || !text || !messageId) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 }
       );
     }
 
+    // Get meeting and agent
     const [existingMeeting] = await db
       .select()
       .from(meetings)
@@ -192,45 +229,122 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
-    if (userId !== existingAgent.id) {
-      const instructions = `
-      You are an AI assistant helping the user revisit a recently completed meeting.
-      Below is a summary of the meeting, generated from the transcript:
+    // Early return if this is an agent message (prevent agent from responding to itself)
+    if (userId === existingAgent.id) {
+      console.log(`[Webhook] Skipping agent's own message ${messageId}`);
+      return NextResponse.json({ status: "ok", skipped: "agent_message" });
+    }
+
+    // Only respond to user messages
+    const instructions = `
+      Sen, kullanıcının tamamlanmış bir toplantıyı tekrar gözden geçirmesine yardımcı olan bir AI asistanısın.
+      Aşağıda, transkriptten oluşturulmuş toplantı özeti bulunmaktadır:
       
       ${existingMeeting.summary}
       
-      The following are your original instructions from the live meeting assistant. Please continue to follow these behavioral guidelines as you assist the user:
+      Aşağıdakiler, canlı toplantı asistanından gelen orijinal talimatlarındır. Kullanıcıya yardımcı olurken bu davranışsal yönergeleri takip etmeye devam et:
       
       ${existingAgent.instructions}
       
-      The user may ask questions about the meeting, request clarifications, or ask for follow-up actions.
-      Always base your responses on the meeting summary above.
+      Kullanıcı toplantı hakkında sorular sorabilir, açıklamalar isteyebilir veya takip eylemleri talep edebilir.
+      Her zaman yukarıdaki toplantı özetine dayanarak cevap ver.
       
-      You also have access to the recent conversation history between you and the user. Use the context of previous messages to provide relevant, coherent, and helpful responses. If the user's question refers to something discussed earlier, make sure to take that into account and maintain continuity in the conversation.
+      Ayrıca sen ve kullanıcı arasındaki son konuşma geçmişine de erişimin var. Önceki mesajların bağlamını kullanarak ilgili, tutarlı ve yardımcı cevaplar ver. Kullanıcının sorusu daha önce tartışılan bir şeye atıfta bulunuyorsa, bunu dikkate al ve konuşmada sürekliliği koru.
       
-      If the summary does not contain enough information to answer a question, politely let the user know.
+      Özet bir soruyu cevaplamak için yeterli bilgi içermiyorsa, kullanıcıya nazikçe bildir.
       
-      Be concise, helpful, and focus on providing accurate information from the meeting and the ongoing conversation.
+      Özlü, yardımcı ol ve toplantıdan ve devam eden konuşmadan doğru bilgilere odaklan.
+      
+      ÖNEMLİ: Her zaman Türkçe cevap ver. Hiçbir zaman İngilizce veya başka bir dilde cevap verme.
       `;
 
       const channel = streamChat.channel("messaging", channelId);
       await channel.watch();
 
-      const previousMessages = channel.state.messages
-        .slice(-5)
-        .filter((msg) => msg.text && msg.text.trim() !== "")
-        .map<ChatCompletionMessageParam>((message) => ({
-          role: message.user?.id === existingAgent.id ? "assistant" : "user",
-          content: message.text || "",
-        }));
+      // Check if we've already responded to this exact message to prevent duplicates
+      const currentMessageId = event.message?.id;
+      const recentAgentMessages = channel.state.messages
+        .filter((msg) => 
+          msg.user?.id === existingAgent.id && 
+          msg.text && 
+          msg.text.trim() !== "" &&
+          msg.id !== currentMessageId // Exclude current message if it's from agent
+        )
+        .slice(-5); // Check last 5 agent messages
+
+      // Check if we've already responded recently (within last 10 seconds)
+      const now = Date.now();
+      const veryRecentResponse = recentAgentMessages.find((msg) => {
+        const msgTime = msg.created_at ? new Date(msg.created_at).getTime() : 0;
+        return (now - msgTime) < 10000; // Within last 10 seconds
+      });
+
+      if (veryRecentResponse) {
+        console.log(`[Webhook] Skipping duplicate response - recent response found within 10 seconds for message ${currentMessageId}`);
+        return NextResponse.json({ status: "ok", skipped: "duplicate_recent" });
+      }
+
+      // Also check if we've already processed this exact message ID (prevent processing same message twice)
+      // Check if there's already an agent response that was created right after this user message
+      const userMessageTime = event.message?.created_at ? new Date(event.message.created_at).getTime() : 0;
+      const agentResponseAfterThis = channel.state.messages.find((msg) => 
+        msg.user?.id === existingAgent.id && 
+        msg.text && 
+        msg.text.trim() !== "" &&
+        msg.created_at && 
+        new Date(msg.created_at).getTime() > userMessageTime &&
+        (new Date(msg.created_at).getTime() - userMessageTime) < 30000 // Within 30 seconds of user message
+      );
+
+      if (agentResponseAfterThis) {
+        console.log(`[Webhook] Skipping duplicate response - agent already responded to message ${currentMessageId}`);
+        return NextResponse.json({ status: "ok", skipped: "duplicate_already_responded" });
+      }
+
+      // Get conversation history in chronological order, excluding the current message
+      // Remove duplicate consecutive messages to avoid repetition
+      const conversationHistory: ChatCompletionMessageParam[] = [];
+      const allMessagesSorted = [...channel.state.messages]
+        .filter((msg) => 
+          msg.text && 
+          msg.text.trim() !== "" && 
+          msg.id !== event.message?.id // Exclude the current message
+        )
+        .sort((a, b) => {
+          const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+          return timeA - timeB;
+        })
+        .slice(-12); // Last 12 messages for context
+
+      // Remove duplicate consecutive messages (same user, similar content)
+      let lastMessage: { role: string; content: string } | null = null;
+      allMessagesSorted.forEach((msg) => {
+        const role = msg.user?.id === existingAgent.id ? "assistant" : "user";
+        const content = msg.text || "";
+        
+        // Skip if this is a duplicate of the last message (same role and very similar content)
+        if (lastMessage && 
+            lastMessage.role === role && 
+            lastMessage.content.trim().toLowerCase() === content.trim().toLowerCase()) {
+          return; // Skip duplicate
+        }
+        
+        conversationHistory.push({ role, content });
+        lastMessage = { role, content };
+      });
+
+      // Limit to last 10 messages to avoid token limits
+      const finalHistory = conversationHistory.slice(-10);
 
       const GPTResponse = await openaiClient.chat.completions.create({
         messages: [
           { role: "system", content: instructions },
-          ...previousMessages,
+          ...finalHistory,
           { role: "user", content: text },
         ],
         model: "gpt-4o",
+        temperature: 0.7, // Add some variation to responses
       });
 
       const GPTResponseText = GPTResponse.choices[0].message.content;
@@ -261,7 +375,6 @@ export async function POST(req: NextRequest) {
             image: avatarUrl,
         },
       });
-    }
   }
 
   return NextResponse.json({ status: "ok" });
